@@ -1,7 +1,9 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Outlet, useLocation } from 'react-router-dom';
 import { Menu, Bell } from 'lucide-react';
 import Sidebar from './Sidebar';
+import { useAuth } from '@/lib/auth';
+import { prefetchAllData } from '@/lib/dataCache';
 
 const ROUTE_TITLES: Record<string, { title: string; subtitle?: string }> = {
   '/': { title: 'Painel de Controle', subtitle: 'Visão geral dos ativos e documentação' },
@@ -16,6 +18,18 @@ const ROUTE_TITLES: Record<string, { title: string; subtitle?: string }> = {
 export default function Layout() {
   const [mobileOpen, setMobileOpen] = useState(false);
   const location = useLocation();
+  const { user, access } = useAuth();
+
+  useEffect(() => {
+    prefetchAllData();
+  }, []);
+
+  const userInitials = (access?.full_name || user?.email || 'U')
+    .split(' ')
+    .map((n) => n[0])
+    .join('')
+    .substring(0, 2)
+    .toUpperCase();
 
   const routeInfo =
     ROUTE_TITLES[location.pathname] ||
@@ -53,8 +67,8 @@ export default function Layout() {
               <Bell className="w-5 h-5" />
               <span className="absolute top-1.5 right-1.5 w-2 h-2 bg-orange-500 rounded-full ring-2 ring-white" />
             </button>
-            <div className="w-9 h-9 rounded-full bg-gradient-to-br from-primary-400 to-primary-600 flex items-center justify-center text-sm font-semibold text-white">
-              GR
+            <div className="w-9 h-9 rounded-full bg-gradient-to-br from-primary-400 to-primary-600 flex items-center justify-center text-sm font-semibold text-white" title={access?.full_name || user?.email || 'Usuário'}>
+              {userInitials}
             </div>
           </div>
         </header>

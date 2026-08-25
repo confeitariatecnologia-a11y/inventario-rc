@@ -1,7 +1,8 @@
 import { createContext, useContext, useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { supabase } from '@/lib/supabase';
-import type { UserAccess } from '@/types';
+import { Spinner } from '@/components';
+import type { UserAccess, AccessRole } from '@/types';
 import type { Session, User } from '@supabase/supabase-js';
 
 interface AuthContextValue {
@@ -19,139 +20,169 @@ interface AuthContextValue {
 
 const AuthContext = createContext<AuthContextValue | undefined>(undefined);
 
+const ACCESS_CACHE_KEY = 'richesse_user_access';
+
+function getCachedAccess(): UserAccess | null {
+  try {
+    const raw = sessionStorage.getItem(ACCESS_CACHE_KEY);
+    return raw ? JSON.parse(raw) : null;
+  } catch {
+    return null;
+  }
+}
+
+function setCachedAccess(access: UserAccess | null) {
+  try {
+    if (access) {
+      sessionStorage.setItem(ACCESS_CACHE_KEY, JSON.stringify(access));
+    } else {
+      sessionStorage.removeItem(ACCESS_CACHE_KEY);
+    }
+  } catch {
+    // Ignore storage errors (e.g. quota exceeded, private mode)
+  }
+}
+
 async function fetchUserAccess(email: string): Promise<UserAccess | null> {
+  const normalizedEmail = email.trim().toLowerCase();
   const { data, error } = await supabase
     .from('user_accesses')
     .select('*')
-    .eq('email', email)
+    .ilike('email', normalizedEmail)
     .maybeSingle();
 
   if (error) {
+    console.error('[Auth] Erro ao consultar user_accesses:', error);
     throw error;
   }
 
   return data;
 }
 
-/** Remove dados de sessão corrompidos do localStorage */
-function clearSupabaseSession() {
-  const keysToRemove: string[] = [];
-  for (let i = 0; i < localStorage.length; i++) {
-    const key = localStorage.key(i);
-    if (key && key.startsWith('sb-')) {
-      keysToRemove.push(key);
-    }
-  }
-  keysToRemove.forEach((key) => localStorage.removeItem(key));
-}
-
 export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [session, setSession] = useState<Session | null>(null);
   const [user, setUser] = useState<User | null>(null);
-  const [access, setAccess] = useState<UserAccess | null>(null);
+  const [access, setAccess] = useState<UserAccess | null>(getCachedAccess);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     let isMounted = true;
 
-    async function initialize() {
-      try {
-        setLoading(true);
-        const { data } = await supabase.auth.getSession();
-        if (!isMounted) return;
-
-        const sessionValue = data.session;
-        setSession(sessionValue);
-        setUser(sessionValue?.user ?? null);
-
-        if (sessionValue?.user?.email) {
-          try {
-            const accessValue = await fetchUserAccess(sessionValue.user.email);
-            if (!isMounted) return;
-            if (!accessValue) {
-              setError('Usuário não autorizado.');
-              await supabase.auth.signOut();
-              setSession(null);
-              setUser(null);
-              setAccess(null);
-            } else {
-              setAccess(accessValue);
-            }
-          } catch (fetchError) {
-            if (!isMounted) return;
-            console.error('Erro ao buscar permissões:', fetchError);
-            // Se falhou ao carregar permissões, faz logout para limpar sessão inválida
-            await supabase.auth.signOut().catch(() => { });
-            setSession(null);
-            setUser(null);
-            setAccess(null);
-            setError('Sessão inválida. Faça login novamente.');
-          }
-        }
-      } catch (err) {
-        console.error('Erro ao inicializar autenticação:', err);
-        // Limpa dados corrompidos do localStorage
-        clearSupabaseSession();
-        setError('Sessão corrompida. Faça login novamente.');
-      } finally {
-        if (isMounted) {
-          setLoading(false);
-        }
+    // Timeout de segurança ultra rápido (1.2s max)
+    const fallbackTimeout = setTimeout(() => {
+      if (isMounted) {
+        setLoading(false);
       }
-    }
+    }, 1200);
 
-    initialize();
-
-    const { data: authListener } = supabase.auth.onAuthStateChange(async (_, sessionValue) => {
+    async function handleSession(sessionValue: Session | null) {
       if (!isMounted) return;
-      setSession(sessionValue ?? null);
+      setSession(sessionValue);
       setUser(sessionValue?.user ?? null);
-      setError(null);
+
       if (sessionValue?.user?.email) {
+        // Se já houver permissões em cache, libera o carregamento instantaneamente (0ms)
+        const cached = getCachedAccess();
+        if (cached && cached.email.toLowerCase() === sessionValue.user.email.toLowerCase()) {
+          setAccess(cached);
+          if (isMounted) setLoading(false);
+        }
+
         try {
           const accessValue = await fetchUserAccess(sessionValue.user.email);
           if (!isMounted) return;
           if (!accessValue) {
-            setError('Usuário não autorizado.');
-            await supabase.auth.signOut();
+            setError(`O e-mail ${sessionValue.user.email} não possui acesso cadastrado no sistema (user_accesses).`);
+            setCachedAccess(null);
+            await supabase.auth.signOut().catch(() => {});
+            setSession(null);
+            setUser(null);
+            setAccess(null);
+          } else if (!accessValue.is_active) {
+            setError('Seu acesso está inativo. Entre em contato com o administrador.');
+            setCachedAccess(null);
+            await supabase.auth.signOut().catch(() => {});
             setSession(null);
             setUser(null);
             setAccess(null);
           } else {
             setAccess(accessValue);
+            setCachedAccess(accessValue);
           }
         } catch (fetchError) {
           if (!isMounted) return;
-          setError(fetchError instanceof Error ? fetchError.message : 'Falha ao carregar permissões.');
-          setAccess(null);
+          console.error('[Auth] Erro ao buscar permissões:', fetchError);
         }
       } else {
         setAccess(null);
+        setCachedAccess(null);
       }
-      setLoading(false);
+
+      if (isMounted) {
+        setLoading(false);
+      }
+    }
+
+    const { data: authListener } = supabase.auth.onAuthStateChange(async (event, sessionValue) => {
+      if (!isMounted) return;
+      if (event === 'SIGNED_IN') {
+        setError(null);
+      }
+      await handleSession(sessionValue);
     });
 
     return () => {
       isMounted = false;
+      clearTimeout(fallbackTimeout);
       authListener.subscription.unsubscribe();
     };
   }, []);
 
-  const signIn = async (email: string, password: string) => {
+  const signIn = async (identifier: string, password: string) => {
     setLoading(true);
     setError(null);
 
-    console.log('[Auth] signIn chamado para:', email);
+    const cleanInput = identifier.trim();
+    console.log('[Auth] signIn chamado para:', cleanInput);
 
     try {
-      const normalizedEmail = email.trim().toLowerCase();
+      let targetEmail = cleanInput.toLowerCase();
 
-      console.log('[Auth] chamando supabase.auth.signInWithPassword...');
+      // Se não contiver '@', busca o e-mail correspondente pelo nome no cadastro de usuários
+      if (!cleanInput.includes('@')) {
+        const { data: userByExactName } = await supabase
+          .from('user_accesses')
+          .select('email')
+          .ilike('full_name', cleanInput)
+          .maybeSingle();
+
+        if (userByExactName?.email) {
+          targetEmail = userByExactName.email.toLowerCase();
+        } else {
+          // Busca parcial (ex: digitou "Marcos" ou "Supervisor")
+          const { data: userByPartialName } = await supabase
+            .from('user_accesses')
+            .select('email')
+            .ilike('full_name', `%${cleanInput}%`)
+            .limit(1)
+            .maybeSingle();
+
+          if (userByPartialName?.email) {
+            targetEmail = userByPartialName.email.toLowerCase();
+          } else {
+            setError('Usuário não encontrado. Verifique o nome digitado ou use seu e-mail.');
+            setLoading(false);
+            return;
+          }
+        }
+      }
+
+      console.log('[Auth] chamando supabase.auth.signInWithPassword para e-mail:', targetEmail);
 
       // Timeout de 10s para não travar eternamente
       const signInPromise = supabase.auth.signInWithPassword({
-        email: normalizedEmail,
+        email: targetEmail,
         password,
       });
       const timeoutPromise = new Promise<never>((_, reject) =>
@@ -163,7 +194,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       console.log('[Auth] signInWithPassword concluído. Error:', error?.message || 'sem erro');
 
       if (error) {
-        setError(error.message);
+        setError(error.message === 'Invalid login credentials' ? 'Nome/E-mail ou senha incorretos.' : error.message);
         return;
       }
 
@@ -203,6 +234,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const signOut = async () => {
     setLoading(true);
     setError(null);
+    setCachedAccess(null);
     await supabase.auth.signOut();
     setSession(null);
     setUser(null);
@@ -233,6 +265,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
 }
 
+// eslint-disable-next-line react-refresh/only-export-components
 export function useAuth() {
   const context = useContext(AuthContext);
   if (!context) {
@@ -251,28 +284,42 @@ export function RequireAuth({ children }: { children: JSX.Element }) {
     }
   }, [loading, session, navigate]);
 
-  if (loading || !session) {
+  if (loading) {
+    return (
+      <div className="min-h-screen bg-slate-100 flex items-center justify-center">
+        <Spinner size="lg" />
+      </div>
+    );
+  }
+
+  if (!session) {
     return null;
   }
 
   return children;
 }
 
-export function RequireRole({ children, roles }: { children: JSX.Element; roles: Array<'admin' | 'gestor' | 'consulta'> }) {
+export function RequireRole({ children, roles }: { children: JSX.Element; roles: Array<AccessRole> }) {
   const { access, loading } = useAuth();
   const navigate = useNavigate();
+  const rolesKey = roles.join(',');
 
   useEffect(() => {
-    if (!loading && access && !roles.includes(access.role)) {
+    const rolesArray = rolesKey.split(',');
+    if (!loading && access && !rolesArray.includes(access.role)) {
       navigate('/', { replace: true });
     }
-  }, [access, loading, navigate, roles]);
+  }, [access, loading, navigate, rolesKey]);
 
-  if (loading || !access) {
-    return null;
+  if (loading) {
+    return (
+      <div className="p-12 flex items-center justify-center">
+        <Spinner size="lg" />
+      </div>
+    );
   }
 
-  if (!roles.includes(access.role)) {
+  if (!access || !roles.includes(access.role)) {
     return null;
   }
 

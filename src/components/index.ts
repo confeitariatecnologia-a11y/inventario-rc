@@ -8,3 +8,4 @@ export { default as EmptyState } from './EmptyState';
 export { default as ErrorState } from './ErrorState';
 export { default as ConfirmDialog } from './ConfirmDialog';
 export { default as AssetFormModal } from './AssetFormModal';
+export { default as ErrorBoundary } from './ErrorBoundary';

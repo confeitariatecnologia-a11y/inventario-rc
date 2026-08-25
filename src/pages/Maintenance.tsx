@@ -2,27 +2,35 @@ import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { Wrench, Clock, AlertCircle, Calendar, ArrowRight } from 'lucide-react';
 import { supabase } from '@/lib/supabase';
-import { PageHeader, Spinner, ErrorState, EmptyState, StatusBadge } from '@/components';
+import { PageHeader, ErrorState, EmptyState, StatusBadge } from '@/components';
 import { formatDate } from '@/lib/utils';
 import type { Asset } from '@/types';
 
+import { getCachedData, setCachedData } from '@/lib/dataCache';
+
 export default function Maintenance() {
-  const [assets, setAssets] = useState<Asset[]>([]);
-  const [loading, setLoading] = useState(true);
+  const [assets, setAssets] = useState<Asset[]>(() => getCachedData<Asset[]>('maintenance_assets') || getCachedData<Asset[]>('all_assets') || []);
+  const [_loading, setLoading] = useState(() => !(getCachedData('maintenance_assets') || getCachedData('all_assets')));
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     async function load() {
-      const { data, error } = await supabase
-        .from('assets')
-        .select('*, category:categories(*), location:locations(*)')
-        .order('next_maintenance', { ascending: true, nullsFirst: false });
-      if (error) {
-        setError(error.message);
-      } else {
-        setAssets(data || []);
+      try {
+        const { data, error } = await supabase
+          .from('assets')
+          .select('*, category:categories(*), location:locations(*)')
+          .order('next_maintenance', { ascending: true, nullsFirst: false });
+        if (error) {
+          setError(error.message);
+        } else {
+          setAssets(data || []);
+          setCachedData('maintenance_assets', data || []);
+        }
+      } catch (err) {
+        if (!assets.length) setError(err instanceof Error ? err.message : 'Erro ao carregar manutenções');
+      } finally {
+        setLoading(false);
       }
-      setLoading(false);
     }
     load();
   }, []);
@@ -35,8 +43,7 @@ export default function Maintenance() {
     (a) => a.status === 'operacional' && a.next_maintenance && new Date(a.next_maintenance) > new Date(Date.now() + 30 * 24 * 60 * 60 * 1000)
   );
 
-  if (loading) return <div className="p-6"><Spinner size="lg" className="py-20" /></div>;
-  if (error) return <div className="p-6"><ErrorState message={error} /></div>;
+  if (error && !assets.length) return <div className="p-6"><ErrorState message={error} /></div>;
 
   const sections = [
     { title: 'Em Manutenção', items: inMaintenance, icon: Wrench, color: 'text-orange-600', bg: 'bg-orange-50' },

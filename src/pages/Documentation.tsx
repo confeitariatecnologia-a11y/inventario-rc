@@ -2,20 +2,21 @@ import { useEffect, useState, useMemo } from 'react';
 import { Link } from 'react-router-dom';
 import { Search, FileText, Wrench, BookOpen, ArrowRight, Plus, Tag } from 'lucide-react';
 import { supabase } from '@/lib/supabase';
-import { PageHeader, Spinner, ErrorState, EmptyState } from '@/components';
+import { PageHeader, ErrorState, EmptyState } from '@/components';
 import {
   DOC_TYPE_LABELS,
   DOC_STATUS_LABELS,
   DOC_STATUS_STYLES,
-  formatDate,
   timeAgo,
 } from '@/lib/utils';
 import type { Doc, DocumentCategory, DocumentType } from '@/types';
 
+import { getCachedData, setCachedData } from '@/lib/dataCache';
+
 export default function Documentation() {
-  const [docs, setDocs] = useState<Doc[]>([]);
-  const [categories, setCategories] = useState<DocumentCategory[]>([]);
-  const [loading, setLoading] = useState(true);
+  const [docs, setDocs] = useState<Doc[]>(() => getCachedData<Doc[]>('all_docs') || []);
+  const [categories, setCategories] = useState<DocumentCategory[]>(() => getCachedData<DocumentCategory[]>('all_doc_categories') || []);
+  const [_loading, setLoading] = useState(() => !(getCachedData('all_docs') && getCachedData('all_doc_categories')));
   const [error, setError] = useState<string | null>(null);
   const [search, setSearch] = useState('');
   const [typeFilter, setTypeFilter] = useState<DocumentType | 'all'>('all');
@@ -23,20 +24,29 @@ export default function Documentation() {
 
   useEffect(() => {
     async function load() {
-      const [docsRes, catsRes] = await Promise.all([
-        supabase
-          .from('documents')
-          .select('*, category:document_categories(*)')
-          .order('updated_at', { ascending: false }),
-        supabase.from('document_categories').select('*').order('name'),
-      ]);
-      if (docsRes.error) {
-        setError(docsRes.error.message);
-      } else {
-        setDocs(docsRes.data || []);
+      try {
+        const [docsRes, catsRes] = await Promise.all([
+          supabase
+            .from('documents')
+            .select('*, category:document_categories(*)')
+            .order('updated_at', { ascending: false }),
+          supabase.from('document_categories').select('*').order('name'),
+        ]);
+        if (docsRes.error) {
+          if (!docs.length) setError(docsRes.error.message);
+        } else {
+          setDocs(docsRes.data || []);
+          setCachedData('all_docs', docsRes.data || []);
+        }
+        if (catsRes.data) {
+          setCategories(catsRes.data);
+          setCachedData('all_doc_categories', catsRes.data);
+        }
+      } catch (err) {
+        if (!docs.length) setError(err instanceof Error ? err.message : 'Erro ao carregar documentação');
+      } finally {
+        setLoading(false);
       }
-      if (catsRes.data) setCategories(catsRes.data);
-      setLoading(false);
     }
     load();
   }, []);
@@ -60,8 +70,7 @@ export default function Documentation() {
   const sopCount = docs.filter((d) => d.category?.type === 'sop').length;
   const techCount = docs.filter((d) => d.category?.type === 'technical').length;
 
-  if (loading) return <div className="p-6"><Spinner size="lg" className="py-20" /></div>;
-  if (error) return <div className="p-6"><ErrorState message={error} /></div>;
+  if (error && !docs.length) return <div className="p-6"><ErrorState message={error} /></div>;
 
   return (
     <div className="p-4 lg:p-6 max-w-7xl mx-auto">

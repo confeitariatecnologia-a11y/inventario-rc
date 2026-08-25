@@ -9,11 +9,15 @@ import {
   FileText,
   AlertTriangle,
   Clock,
+  Coins,
+  ShieldCheck,
 } from 'lucide-react';
 import { supabase } from '@/lib/supabase';
-import { PageHeader, AssetCard, Spinner, ErrorState } from '@/components';
+import { PageHeader, AssetCard, ErrorState } from '@/components';
 import type { Asset, Doc } from '@/types';
 import { formatDate, timeAgo } from '@/lib/utils';
+import { calculateDepreciation } from '@/lib/depreciation';
+import { getCachedData, setCachedData } from '@/lib/dataCache';
 
 interface Stats {
   total: number;
@@ -22,14 +26,27 @@ interface Stats {
   emprestado: number;
   baixado: number;
   totalValue: number;
+  totalBookValue: number;
+  totalResidualValue: number;
   docsTotal: number;
 }
 
+const DEFAULT_STATS: Stats = {
+  total: 0,
+  operacional: 0,
+  manutencao: 0,
+  emprestado: 0,
+  baixado: 0,
+  totalValue: 0,
+  totalBookValue: 0,
+  totalResidualValue: 0,
+  docsTotal: 0,
+};
+
 export default function Dashboard() {
-  const [stats, setStats] = useState<Stats | null>(null);
-  const [recentAssets, setRecentAssets] = useState<Asset[]>([]);
-  const [recentDocs, setRecentDocs] = useState<Doc[]>([]);
-  const [loading, setLoading] = useState(true);
+  const [stats, setStats] = useState<Stats>(() => getCachedData<Stats>('dashboard_stats') || DEFAULT_STATS);
+  const [recentAssets, setRecentAssets] = useState<Asset[]>(() => getCachedData<Asset[]>('dashboard_assets') || []);
+  const [recentDocs, setRecentDocs] = useState<Doc[]>(() => getCachedData<Doc[]>('dashboard_docs') || []);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -39,6 +56,7 @@ export default function Dashboard() {
           supabase
             .from('assets')
             .select('*, category:categories(*), location:locations(*)')
+            .range(0, 9999)
             .order('updated_at', { ascending: false }),
           supabase
             .from('documents')
@@ -53,34 +71,51 @@ export default function Dashboard() {
         const assets = assetsRes.data || [];
         const docs = docsRes.data || [];
 
-        setStats({
+        let totalValue = 0;
+        let totalBookValue = 0;
+        let totalResidualValue = 0;
+
+        for (const a of assets) {
+          const val = Number(a.acquisition_value) || 0;
+          totalValue += val;
+          const dep = calculateDepreciation(a);
+          totalBookValue += dep.currentBookValue;
+          totalResidualValue += dep.residualValue;
+        }
+
+        const calculatedStats: Stats = {
           total: assets.length,
           operacional: assets.filter((a) => a.status === 'operacional').length,
           manutencao: assets.filter((a) => a.status === 'manutencao').length,
           emprestado: assets.filter((a) => a.status === 'emprestado').length,
           baixado: assets.filter((a) => a.status === 'baixado').length,
-          totalValue: assets.reduce((sum, a) => sum + (a.acquisition_value || 0), 0),
+          totalValue,
+          totalBookValue,
+          totalResidualValue,
           docsTotal: docs.length,
-        });
+        };
+
+        setStats(calculatedStats);
         setRecentAssets(assets.slice(0, 6));
         setRecentDocs(docs);
+
+        setCachedData('dashboard_stats', calculatedStats);
+        setCachedData('dashboard_assets', assets.slice(0, 6));
+        setCachedData('dashboard_docs', docs);
+        setCachedData('all_assets', assets);
       } catch (err) {
-        setError(err instanceof Error ? err.message : 'Erro ao carregar dados');
-      } finally {
-        setLoading(false);
+        if (!stats) setError(err instanceof Error ? err.message : 'Erro ao carregar dados');
       }
     }
     load();
   }, []);
 
-  if (loading) return <div className="p-6"><Spinner size="lg" className="py-20" /></div>;
-  if (error) return <div className="p-6"><ErrorState message={error} /></div>;
-  if (!stats) return null;
+  if (error && !stats.total) return <div className="p-6"><ErrorState message={error} /></div>;
 
   const cards = [
     {
       label: 'Total de Ativos',
-      value: stats.total,
+      value: (stats?.total ?? 0).toLocaleString('pt-BR'),
       icon: Boxes,
       color: 'bg-primary-500',
       bg: 'bg-primary-50',
@@ -88,7 +123,7 @@ export default function Dashboard() {
     },
     {
       label: 'Operacionais',
-      value: stats.operacional,
+      value: (stats?.operacional ?? 0).toLocaleString('pt-BR'),
       icon: CheckCircle2,
       color: 'bg-emerald-500',
       bg: 'bg-emerald-50',
@@ -96,19 +131,36 @@ export default function Dashboard() {
     },
     {
       label: 'Em Manutenção',
-      value: stats.manutencao,
+      value: (stats?.manutencao ?? 0).toLocaleString('pt-BR'),
       icon: Wrench,
       color: 'bg-orange-500',
       bg: 'bg-orange-50',
       text: 'text-orange-700',
     },
     {
-      label: 'Valor Total',
-      value: stats.totalValue.toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' }),
+      label: 'Valor de Aquisição',
+      value: (stats?.totalValue ?? 0).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' }),
       icon: TrendingUp,
       color: 'bg-slate-700',
       bg: 'bg-slate-100',
       text: 'text-slate-700',
+    },
+    {
+      label: 'Valor Contábil Líquido',
+      value: (stats?.totalBookValue ?? 0).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' }),
+      icon: Coins,
+      color: 'bg-indigo-600',
+      bg: 'bg-indigo-50',
+      text: 'text-indigo-700',
+      badge: 'Depreciado',
+    },
+    {
+      label: 'Valor Residual Estimado',
+      value: (stats?.totalResidualValue ?? 0).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' }),
+      icon: ShieldCheck,
+      color: 'bg-teal-600',
+      bg: 'bg-teal-50',
+      text: 'text-teal-700',
     },
   ];
 
@@ -120,23 +172,38 @@ export default function Dashboard() {
       />
 
       {/* Stats cards */}
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 lg:gap-4 mb-8">
+      <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-3 lg:gap-4 mb-8">
         {cards.map((card) => {
           const Icon = card.icon;
+          const isCurrency = card.value.startsWith('R$');
           return (
             <div
               key={card.label}
-              className="bg-white rounded-xl border border-slate-200 p-4 lg:p-5 hover:shadow-card transition-shadow"
+              className="bg-white rounded-xl border border-slate-200 p-4 hover:shadow-card transition-shadow flex flex-col justify-between min-w-0"
             >
-              <div className="flex items-start justify-between mb-3">
-                <div className={`w-10 h-10 rounded-lg ${card.bg} flex items-center justify-center`}>
-                  <Icon className={`w-5 h-5 ${card.text}`} />
+              <div className="flex items-start justify-between mb-2">
+                <div className={`w-9 h-9 rounded-lg ${card.bg} flex items-center justify-center flex-shrink-0`}>
+                  <Icon className={`w-4 h-4 ${card.text}`} />
                 </div>
+                {card.badge && (
+                  <span className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-indigo-50 text-indigo-700">
+                    {card.badge}
+                  </span>
+                )}
               </div>
-              <p className="text-2xl lg:text-3xl font-bold text-slate-900 tracking-tight">
-                {card.value}
-              </p>
-              <p className="text-xs lg:text-sm text-slate-500 mt-1">{card.label}</p>
+              <div className="min-w-0">
+                <p
+                  className={`font-bold text-slate-900 tracking-tight truncate ${
+                    isCurrency ? 'text-base sm:text-lg 2xl:text-xl' : 'text-2xl 2xl:text-3xl'
+                  }`}
+                  title={card.value}
+                >
+                  {card.value}
+                </p>
+                <p className="text-xs text-slate-500 mt-0.5 font-medium truncate" title={card.label}>
+                  {card.label}
+                </p>
+              </div>
             </div>
           );
         })}

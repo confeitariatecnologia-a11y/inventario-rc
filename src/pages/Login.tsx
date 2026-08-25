@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { Eye, EyeOff } from 'lucide-react';
 import { useAuth } from '@/lib/auth';
 
 export default function Login() {
@@ -7,6 +8,7 @@ export default function Login() {
   const { session, signIn, loading, error } = useAuth();
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
+  const [showPassword, setShowPassword] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -37,29 +39,39 @@ export default function Login() {
         <div className="mb-8 text-center">
           <h1 className="text-2xl font-semibold text-slate-900">Entrar no Richesse</h1>
           <p className="text-sm text-slate-500 mt-2">
-            Use seu e-mail cadastrado para continuar.
+            Digite seu nome de usuário ou e-mail cadastrado.
           </p>
         </div>
         <form onSubmit={handleSubmit} className="space-y-4">
           <label className="block">
-            <span className="text-xs font-semibold text-slate-600">E-mail</span>
+            <span className="text-xs font-semibold text-slate-600">Usuário ou E-mail</span>
             <input
-              type="email"
+              type="text"
               value={email}
               onChange={(event) => setEmail(event.target.value)}
               className="mt-2 w-full rounded-2xl border border-slate-200 px-4 py-3 text-sm text-slate-900 focus:border-primary-500 focus:outline-none focus:ring-2 focus:ring-primary-500/20"
-              placeholder="usuario@empresa.com"
+              placeholder="Seu nome ou e-mail"
             />
           </label>
           <label className="block">
             <span className="text-xs font-semibold text-slate-600">Senha</span>
-            <input
-              type="password"
-              value={password}
-              onChange={(event) => setPassword(event.target.value)}
-              className="mt-2 w-full rounded-2xl border border-slate-200 px-4 py-3 text-sm text-slate-900 focus:border-primary-500 focus:outline-none focus:ring-2 focus:ring-primary-500/20"
-              placeholder="•••••••••"
-            />
+            <div className="relative mt-2">
+              <input
+                type={showPassword ? 'text' : 'password'}
+                value={password}
+                onChange={(event) => setPassword(event.target.value)}
+                className="w-full rounded-2xl border border-slate-200 pl-4 pr-11 py-3 text-sm text-slate-900 focus:border-primary-500 focus:outline-none focus:ring-2 focus:ring-primary-500/20"
+                placeholder="•••••••••"
+              />
+              <button
+                type="button"
+                onClick={() => setShowPassword(!showPassword)}
+                className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 p-1 rounded-lg transition-colors"
+                title={showPassword ? 'Ocultar senha' : 'Ver senha'}
+              >
+                {showPassword ? <EyeOff className="w-5 h-5" /> : <Eye className="w-5 h-5" />}
+              </button>
+            </div>
           </label>
           {formError && <p className="text-sm text-red-600 bg-red-50 p-2 rounded-lg">{formError}</p>}
           {error && <p className="text-sm text-red-600 bg-red-50 p-2 rounded-lg border border-red-200">{error}</p>}

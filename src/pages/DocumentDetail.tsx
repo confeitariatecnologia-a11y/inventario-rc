@@ -91,23 +91,38 @@ export default function DocumentDetail() {
   useEffect(() => {
     if (!slug) return;
     async function load() {
-      setLoading(true);
-      const { data, error } = await supabase
-        .from('documents')
-        .select('*, category:document_categories(*)')
-        .eq('slug', slug)
-        .maybeSingle();
-      if (error) {
-        setError(error.message);
-      } else if (!data) {
-        setError('Documento não encontrado');
-      } else {
-        setDoc(data);
+      try {
+        setLoading(true);
+        const { data, error } = await supabase
+          .from('documents')
+          .select('*, category:document_categories(*)')
+          .eq('slug', slug)
+          .maybeSingle();
+        if (error) {
+          setError(error.message);
+        } else if (!data) {
+          setError('Documento não encontrado');
+        } else {
+          setDoc(data);
+        }
+      } catch (err) {
+        setError(err instanceof Error ? err.message : 'Erro ao carregar documento');
+      } finally {
+        setLoading(false);
       }
-      setLoading(false);
     }
     load();
   }, [slug]);
+
+  const rawContent = doc?.content || '';
+  const sanitizedHtml = useMemo(() => {
+    if (!rawContent) return '';
+    const raw = renderMarkdown(rawContent);
+    return DOMPurify.sanitize(raw, {
+      ALLOWED_TAGS: ['h1', 'h2', 'h3', 'p', 'ul', 'ol', 'li', 'strong', 'code', 'a', 'br'],
+      ALLOWED_ATTR: ['href', 'target', 'rel'],
+    });
+  }, [rawContent]);
 
   if (loading) return <div className="p-6"><Spinner size="lg" className="py-20" /></div>;
   if (error) return (
@@ -122,13 +137,6 @@ export default function DocumentDetail() {
 
   const isSop = doc.category?.type === 'sop';
 
-  const sanitizedHtml = useMemo(() => {
-    const raw = renderMarkdown(doc.content);
-    return DOMPurify.sanitize(raw, {
-      ALLOWED_TAGS: ['h1', 'h2', 'h3', 'p', 'ul', 'ol', 'li', 'strong', 'code', 'a', 'br'],
-      ALLOWED_ATTR: ['href', 'target', 'rel'],
-    });
-  }, [doc.content]);
 
   return (
     <div className="p-4 lg:p-6 max-w-4xl mx-auto">

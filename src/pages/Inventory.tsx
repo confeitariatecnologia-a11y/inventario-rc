@@ -11,6 +11,12 @@ import {
   Trash2,
   MapPin,
   Pencil,
+  FileSpreadsheet,
+  FileText,
+  ChevronLeft,
+  ChevronRight,
+  ChevronsLeft,
+  ChevronsRight,
 } from 'lucide-react';
 import { supabase } from '@/lib/supabase';
 import {
@@ -25,16 +31,22 @@ import {
 } from '@/components';
 import { STATUS_LABELS } from '@/lib/utils';
 import type { Asset, Category, Location, AssetStatus } from '@/types';
+import { exportAssetsToExcel, exportAssetsToPDF } from '@/lib/exportUtils';
+import { getCachedData, setCachedData, invalidateCache } from '@/lib/dataCache';
 
 const STATUS_OPTIONS: AssetStatus[] = ['operacional', 'manutencao', 'emprestado', 'baixado'];
 
 export default function Inventory() {
   const navigate = useNavigate();
-  const [assets, setAssets] = useState<Asset[]>([]);
-  const [categories, setCategories] = useState<Category[]>([]);
-  const [locations, setLocations] = useState<Location[]>([]);
-  const [loading, setLoading] = useState(true);
+  const [assets, setAssets] = useState<Asset[]>(() => getCachedData<Asset[]>('all_assets') || []);
+  const [categories, setCategories] = useState<Category[]>(() => getCachedData<Category[]>('all_categories') || []);
+  const [locations, setLocations] = useState<Location[]>(() => getCachedData<Location[]>('all_locations') || []);
+  const [loading, setLoading] = useState(() => !getCachedData<Asset[]>('all_assets'));
   const [error, setError] = useState<string | null>(null);
+  
+  // Paginação
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState<number>(25);
 
   const [search, setSearch] = useState('');
   const [statusFilter, setStatusFilter] = useState<AssetStatus | 'all'>('all');
@@ -55,33 +67,48 @@ export default function Inventory() {
   const [showRelocate, setShowRelocate] = useState(false);
   const [actionLoading, setActionLoading] = useState(false);
 
-  const loadAssets = useCallback(async () => {
-    setLoading(true);
-    const { data, error } = await supabase
-      .from('assets')
-      .select('*, category:categories(*), location:locations(*)')
-      .order('name', { ascending: true });
-    if (error) {
-      setError(error.message);
-    } else {
-      setAssets(data || []);
-      setError(null);
-    }
-    setLoading(false);
-  }, []);
-
-  useEffect(() => {
-    async function load() {
-      const [cats, locs] = await Promise.all([
+  const loadAllData = useCallback(async (silent = false) => {
+    try {
+      if (!silent) setLoading(true);
+      const [assetsRes, catsRes, locsRes] = await Promise.all([
+        supabase
+          .from('assets')
+          .select('*, category:categories(*), location:locations(*)')
+          .range(0, 9999)
+          .order('name', { ascending: true }),
         supabase.from('categories').select('*').order('name'),
         supabase.from('locations').select('*').order('name'),
       ]);
-      if (cats.data) setCategories(cats.data);
-      if (locs.data) setLocations(locs.data);
-      await loadAssets();
+
+      if (assetsRes.error) setError(assetsRes.error.message);
+      else {
+        setAssets(assetsRes.data || []);
+        setCachedData('all_assets', assetsRes.data || []);
+        setError(null);
+      }
+
+      if (catsRes.data) {
+        setCategories(catsRes.data);
+        setCachedData('all_categories', catsRes.data);
+      }
+      if (locsRes.data) {
+        setLocations(locsRes.data);
+        setCachedData('all_locations', locsRes.data);
+      }
+    } catch (err) {
+      if (!assets.length) setError(err instanceof Error ? err.message : 'Erro ao carregar inventário');
+    } finally {
+      if (!silent) setLoading(false);
     }
-    load();
-  }, [loadAssets]);
+  }, [assets.length]);
+
+  const loadAssets = useCallback(async (silent = false) => {
+    return loadAllData(silent);
+  }, [loadAllData]);
+
+  useEffect(() => {
+    loadAllData(Boolean(getCachedData('all_assets')));
+  }, [loadAllData]);
 
   const filtered = useMemo(() => {
     return assets.filter((asset) => {
@@ -100,6 +127,18 @@ export default function Inventory() {
       return true;
     });
   }, [assets, search, statusFilter, categoryFilter, locationFilter]);
+
+  // Reseta para a página 1 ao alterar filtros
+  useEffect(() => {
+    setPage(1);
+  }, [search, statusFilter, categoryFilter, locationFilter, pageSize]);
+
+  const totalPages = pageSize === -1 ? 1 : Math.max(1, Math.ceil(filtered.length / pageSize));
+  const paginatedAssets = useMemo(() => {
+    if (pageSize === -1) return filtered;
+    const start = (page - 1) * pageSize;
+    return filtered.slice(start, start + pageSize);
+  }, [filtered, page, pageSize]);
 
   const activeFilters =
     (statusFilter !== 'all' ? 1 : 0) +
@@ -132,11 +171,12 @@ export default function Inventory() {
 
   function enterSelectionMode() {
     setSelectionMode(true);
+    setSelectedIds(new Set());
   }
 
   function exitSelectionMode() {
     setSelectionMode(false);
-    clearSelection();
+    setSelectedIds(new Set());
   }
 
   // CRUD handlers
@@ -156,30 +196,40 @@ export default function Inventory() {
     setActionLoading(false);
     if (delErr) {
       setError(delErr.message);
+      await loadAssets(true);
       return;
     }
+    invalidateCache('all_assets');
+    invalidateCache('dashboard_');
+    invalidateCache('maintenance_');
+    invalidateCache('reports_');
+    invalidateCache('qrcode_');
     setConfirmDelete(null);
     exitSelectionMode();
-    await loadAssets();
+    await loadAssets(true);
   }
 
-  async function relocateSelected(locationId: string) {
-    if (!locationId) return;
+  async function relocateSelected(targetLocationId: string) {
+    if (!targetLocationId) return;
     setActionLoading(true);
     const ids = Array.from(selectedIds);
     const { error: updErr } = await supabase
       .from('assets')
-      .update({ location_id: locationId, updated_at: new Date().toISOString() })
+      .update({ location_id: targetLocationId, updated_at: new Date().toISOString() })
       .in('id', ids);
     setActionLoading(false);
     if (updErr) {
       setError(updErr.message);
+      await loadAssets(true);
       return;
     }
+    invalidateCache('all_assets');
+    invalidateCache('dashboard_');
+    invalidateCache('reports_');
     setShowRelocate(false);
     setRelocateTarget('');
     exitSelectionMode();
-    await loadAssets();
+    await loadAssets(true);
   }
 
   const selectedCount = selectedIds.size;
@@ -191,13 +241,31 @@ export default function Inventory() {
         title="Inventário de Ativos"
         subtitle={`${assets.length} ativos cadastrados no sistema`}
         actions={
-          <button
-            onClick={openNewAsset}
-            className="inline-flex items-center gap-2 bg-primary-600 hover:bg-primary-700 text-white text-sm font-medium px-4 py-2 rounded-lg shadow-sm"
-          >
-            <Plus className="w-4 h-4" />
-            Novo Ativo
-          </button>
+          <div className="flex items-center gap-2 flex-wrap">
+            <button
+              onClick={() => void exportAssetsToExcel(filtered)}
+              title="Exportar dados filtrados para planilha Excel (.xlsx)"
+              className="inline-flex items-center gap-1.5 bg-emerald-600 hover:bg-emerald-700 text-white text-xs sm:text-sm font-medium px-3 py-2 rounded-lg shadow-sm transition-colors"
+            >
+              <FileSpreadsheet className="w-4 h-4" />
+              <span className="hidden sm:inline">Exportar</span> Excel
+            </button>
+            <button
+              onClick={() => exportAssetsToPDF(filtered)}
+              title="Exportar relatório em PDF"
+              className="inline-flex items-center gap-1.5 bg-slate-700 hover:bg-slate-800 text-white text-xs sm:text-sm font-medium px-3 py-2 rounded-lg shadow-sm transition-colors"
+            >
+              <FileText className="w-4 h-4" />
+              PDF
+            </button>
+            <button
+              onClick={openNewAsset}
+              className="inline-flex items-center gap-1.5 bg-primary-600 hover:bg-primary-700 text-white text-xs sm:text-sm font-medium px-3.5 py-2 rounded-lg shadow-sm transition-colors"
+            >
+              <Plus className="w-4 h-4" />
+              Novo Ativo
+            </button>
+          </div>
         }
       />
 
@@ -364,17 +432,80 @@ export default function Inventory() {
           description={search || activeFilters > 0 ? "Tente ajustar a busca ou os filtros." : "Comece cadastrando o primeiro ativo."}
         />
       ) : viewMode === 'grid' ? (
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
-          {filtered.map((asset) => (
-            <AssetCard
-              key={asset.id}
-              asset={asset}
-              selected={selectedIds.has(asset.id)}
-              selectionMode={selectionMode}
-              onToggleSelect={toggleSelect}
-            />
-          ))}
-        </div>
+        <>
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
+            {paginatedAssets.map((asset) => (
+              <AssetCard
+                key={asset.id}
+                asset={asset}
+                selected={selectedIds.has(asset.id)}
+                selectionMode={selectionMode}
+                onToggleSelect={toggleSelect}
+              />
+            ))}
+          </div>
+
+          {/* Paginação Grid */}
+          <div className="mt-5 bg-white rounded-xl border border-slate-200 p-4 flex items-center justify-between gap-4 flex-wrap text-sm text-slate-600">
+            <div className="flex items-center gap-2">
+              <span>Exibindo <strong>{pageSize === -1 ? filtered.length : Math.min(filtered.length, (page - 1) * pageSize + 1)}</strong> - <strong>{pageSize === -1 ? filtered.length : Math.min(filtered.length, page * pageSize)}</strong> de <strong>{filtered.length}</strong> ativos</span>
+              <span className="text-slate-300">|</span>
+              <label className="flex items-center gap-1.5 text-xs text-slate-500">
+                Por página:
+                <select
+                  value={pageSize}
+                  onChange={(e) => setPageSize(Number(e.target.value))}
+                  className="px-2 py-1 border border-slate-200 rounded-md bg-white text-xs text-slate-700 font-medium focus:ring-1 focus:ring-primary-500"
+                >
+                  <option value={25}>25</option>
+                  <option value={50}>50</option>
+                  <option value={100}>100</option>
+                  <option value={-1}>Todos</option>
+                </select>
+              </label>
+            </div>
+
+            {pageSize !== -1 && totalPages > 1 && (
+              <div className="flex items-center gap-1">
+                <button
+                  onClick={() => setPage(1)}
+                  disabled={page === 1}
+                  className="p-1.5 rounded-lg border border-slate-200 hover:bg-slate-50 disabled:opacity-30 disabled:pointer-events-none"
+                  title="Primeira página"
+                >
+                  <ChevronsLeft className="w-4 h-4" />
+                </button>
+                <button
+                  onClick={() => setPage((p) => Math.max(1, p - 1))}
+                  disabled={page === 1}
+                  className="p-1.5 rounded-lg border border-slate-200 hover:bg-slate-50 disabled:opacity-30 disabled:pointer-events-none"
+                  title="Página anterior"
+                >
+                  <ChevronLeft className="w-4 h-4" />
+                </button>
+                <span className="px-3 py-1 text-xs font-semibold text-slate-700 bg-slate-100 rounded-lg">
+                  {page} / {totalPages}
+                </span>
+                <button
+                  onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
+                  disabled={page === totalPages}
+                  className="p-1.5 rounded-lg border border-slate-200 hover:bg-slate-50 disabled:opacity-30 disabled:pointer-events-none"
+                  title="Próxima página"
+                >
+                  <ChevronRight className="w-4 h-4" />
+                </button>
+                <button
+                  onClick={() => setPage(totalPages)}
+                  disabled={page === totalPages}
+                  className="p-1.5 rounded-lg border border-slate-200 hover:bg-slate-50 disabled:opacity-30 disabled:pointer-events-none"
+                  title="Última página"
+                >
+                  <ChevronsRight className="w-4 h-4" />
+                </button>
+              </div>
+            )}
+          </div>
+        </>
       ) : (
         <div className="bg-white rounded-xl border border-slate-200 overflow-hidden">
           <table className="w-full text-sm">
@@ -399,7 +530,7 @@ export default function Inventory() {
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
-              {filtered.map((asset) => (
+              {paginatedAssets.map((asset) => (
                 <tr
                   key={asset.id}
                   className={`hover:bg-slate-50 ${selectedIds.has(asset.id) ? 'bg-primary-50' : ''}`}
@@ -450,6 +581,67 @@ export default function Inventory() {
               ))}
             </tbody>
           </table>
+
+          {/* Paginação Tabela */}
+          <div className="border-t border-slate-200 px-4 py-3 bg-slate-50 flex items-center justify-between gap-4 flex-wrap text-sm text-slate-600">
+            <div className="flex items-center gap-2">
+              <span>Exibindo <strong>{pageSize === -1 ? filtered.length : Math.min(filtered.length, (page - 1) * pageSize + 1)}</strong> - <strong>{pageSize === -1 ? filtered.length : Math.min(filtered.length, page * pageSize)}</strong> de <strong>{filtered.length}</strong> ativos</span>
+              <span className="text-slate-300">|</span>
+              <label className="flex items-center gap-1.5 text-xs text-slate-500">
+                Por página:
+                <select
+                  value={pageSize}
+                  onChange={(e) => setPageSize(Number(e.target.value))}
+                  className="px-2 py-1 border border-slate-200 rounded-md bg-white text-xs text-slate-700 font-medium focus:ring-1 focus:ring-primary-500"
+                >
+                  <option value={25}>25</option>
+                  <option value={50}>50</option>
+                  <option value={100}>100</option>
+                  <option value={-1}>Todos</option>
+                </select>
+              </label>
+            </div>
+
+            {pageSize !== -1 && totalPages > 1 && (
+              <div className="flex items-center gap-1">
+                <button
+                  onClick={() => setPage(1)}
+                  disabled={page === 1}
+                  className="p-1.5 rounded-lg border border-slate-200 bg-white hover:bg-slate-100 disabled:opacity-30 disabled:pointer-events-none"
+                  title="Primeira página"
+                >
+                  <ChevronsLeft className="w-4 h-4" />
+                </button>
+                <button
+                  onClick={() => setPage((p) => Math.max(1, p - 1))}
+                  disabled={page === 1}
+                  className="p-1.5 rounded-lg border border-slate-200 bg-white hover:bg-slate-100 disabled:opacity-30 disabled:pointer-events-none"
+                  title="Página anterior"
+                >
+                  <ChevronLeft className="w-4 h-4" />
+                </button>
+                <span className="px-3 py-1 text-xs font-semibold text-slate-700 bg-white border border-slate-200 rounded-lg">
+                  Página {page} de {totalPages}
+                </span>
+                <button
+                  onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
+                  disabled={page === totalPages}
+                  className="p-1.5 rounded-lg border border-slate-200 bg-white hover:bg-slate-100 disabled:opacity-30 disabled:pointer-events-none"
+                  title="Próxima página"
+                >
+                  <ChevronRight className="w-4 h-4" />
+                </button>
+                <button
+                  onClick={() => setPage(totalPages)}
+                  disabled={page === totalPages}
+                  className="p-1.5 rounded-lg border border-slate-200 bg-white hover:bg-slate-100 disabled:opacity-30 disabled:pointer-events-none"
+                  title="Última página"
+                >
+                  <ChevronsRight className="w-4 h-4" />
+                </button>
+              </div>
+            )}
+          </div>
         </div>
       )}
 

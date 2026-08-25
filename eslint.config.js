@@ -23,6 +23,10 @@ export default tseslint.config(
         'warn',
         { allowConstantExport: true },
       ],
+      // Desabilita regra com bug de compatibilidade na versão atual do @typescript-eslint
+      '@typescript-eslint/no-unused-expressions': 'off',
+      // Variáveis prefixadas com _ são intencionalmente ignoradas
+      '@typescript-eslint/no-unused-vars': ['error', { varsIgnorePattern: '^_', argsIgnorePattern: '^_' }],
     },
   }
 );

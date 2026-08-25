@@ -1,7 +1,6 @@
-import { useEffect, useState } from 'react';
-import { useParams, Link, useNavigate } from 'react-router-dom';
+import { useEffect, useState, useMemo } from 'react';
+import { useParams, useNavigate } from 'react-router-dom';
 import {
-  ArrowLeft,
   MapPin,
   User,
   Calendar,
@@ -15,6 +14,9 @@ import {
   Printer,
   Pencil,
   Trash2,
+  FileSignature,
+  Coins,
+  X,
 } from 'lucide-react';
 import { QRCodeSVG } from 'qrcode.react';
 import { supabase } from '@/lib/supabase';
@@ -28,6 +30,9 @@ import {
   STATUS_LABELS,
   STATUS_STYLES,
 } from '@/lib/utils';
+import { calculateDepreciation } from '@/lib/depreciation';
+import { generateTermoResponsabilidadePDF } from '@/lib/exportUtils';
+import { invalidateCache } from '@/lib/dataCache';
 
 const MOVEMENT_ICON_MAP: Record<MovementType, typeof Wrench> = {
   status_change: ArrowRightLeft,
@@ -54,102 +59,122 @@ export default function AssetDetail() {
   const [updating, setUpdating] = useState(false);
   const [showEdit, setShowEdit] = useState(false);
   const [showDelete, setShowDelete] = useState(false);
-  const [deleting, setDeleting] = useState(false);
+
+  // Termo de Responsabilidade Modal
+  const [showTermoModal, setShowTermoModal] = useState(false);
+  const [collabName, setCollabName] = useState('');
+  const [collabCpf, setCollabCpf] = useState('');
+  const [collabRole, setCollabRole] = useState('');
+  const [collabDept, setCollabDept] = useState('');
+  const [termoReason, setTermoReason] = useState('Uso profissional em atividades da empresa');
 
   useEffect(() => {
     if (!id) return;
     async function load() {
-      setLoading(true);
-      const [assetRes, moveRes] = await Promise.all([
-        supabase
-          .from('assets')
-          .select('*, category:categories(*), location:locations(*)')
-          .eq('id', id)
-          .maybeSingle(),
-        supabase
-          .from('asset_movements')
-          .select('*')
-          .eq('asset_id', id)
-          .order('created_at', { ascending: false }),
-      ]);
-      if (assetRes.error) {
-        setError(assetRes.error.message);
-      } else if (!assetRes.data) {
-        setError('Ativo não encontrado');
-      } else {
+      try {
+        setLoading(true);
+        const [assetRes, moveRes] = await Promise.all([
+          supabase
+            .from('assets')
+            .select('*, category:categories(*), location:locations(*)')
+            .eq('id', id)
+            .maybeSingle(),
+          supabase
+            .from('asset_movements')
+            .select('*, from_location:locations!asset_movements_from_location_id_fkey(*), to_location:locations!asset_movements_to_location_id_fkey(*)')
+            .eq('asset_id', id)
+            .order('created_at', { ascending: false }),
+        ]);
+
+        if (assetRes.error) throw assetRes.error;
+        if (!assetRes.data) throw new Error('Ativo não encontrado');
+
         setAsset(assetRes.data);
+        if (assetRes.data.responsible) setCollabName(assetRes.data.responsible);
+        setMovements(moveRes.data || []);
+      } catch (err) {
+        setError(err instanceof Error ? err.message : 'Erro ao carregar ativo');
+      } finally {
+        setLoading(false);
       }
-      if (moveRes.data) setMovements(moveRes.data);
-      setLoading(false);
     }
     load();
   }, [id]);
 
-  async function changeStatus(newStatus: AssetStatus) {
+  async function handleStatusChange(newStatus: AssetStatus) {
     if (!asset || newStatus === asset.status) return;
     setUpdating(true);
-    const prevStatus = asset.status;
-    const { error: updErr } = await supabase
-      .from('assets')
-      .update({ status: newStatus, updated_at: new Date().toISOString() })
-      .eq('id', asset.id);
-    if (updErr) {
-      setError(updErr.message);
+    try {
+      const { error: updError } = await supabase
+        .from('assets')
+        .update({ status: newStatus, updated_at: new Date().toISOString() })
+        .eq('id', asset.id);
+
+      if (updError) throw updError;
+
+      await supabase.from('asset_movements').insert({
+        asset_id: asset.id,
+        type: 'status_change' as MovementType,
+        from_status: asset.status,
+        to_status: newStatus,
+        description: `Status alterado de ${STATUS_LABELS[asset.status]} para ${STATUS_LABELS[newStatus]}`,
+      });
+
+      setAsset({ ...asset, status: newStatus });
+      invalidateCache('all_assets');
+      invalidateCache('dashboard_');
+      invalidateCache('reports_');
+    } catch (err) {
+      alert(err instanceof Error ? err.message : 'Erro ao atualizar status');
+    } finally {
       setUpdating(false);
-      return;
     }
-    await supabase.from('asset_movements').insert({
-      asset_id: asset.id,
-      type: 'status_change',
-      previous_value: prevStatus,
-      new_value: newStatus,
-      description: `Status alterado de "${STATUS_LABELS[prevStatus]}" para "${STATUS_LABELS[newStatus]}"`,
-      performed_by: 'Sistema',
-    });
-    setAsset({ ...asset, status: newStatus });
-    const { data: newMoves } = await supabase
-      .from('asset_movements')
-      .select('*')
-      .eq('asset_id', asset.id)
-      .order('created_at', { ascending: false });
-    if (newMoves) setMovements(newMoves);
-    setUpdating(false);
   }
 
   async function handleDelete() {
     if (!asset) return;
-    setDeleting(true);
-    const { error: delErr } = await supabase.from('assets').delete().eq('id', asset.id);
-    setDeleting(false);
-    if (delErr) {
-      setError(delErr.message);
-      setShowDelete(false);
-      return;
+    try {
+      const { error: delError } = await supabase.from('assets').delete().eq('id', asset.id);
+      if (delError) throw delError;
+      invalidateCache('all_assets');
+      invalidateCache('dashboard_');
+      invalidateCache('reports_');
+      navigate('/inventario');
+    } catch (err) {
+      alert(err instanceof Error ? err.message : 'Erro ao excluir ativo');
     }
-    navigate('/inventario');
   }
 
+  function handleGenerateTermo() {
+    if (!asset || !collabName.trim()) return;
+    generateTermoResponsabilidadePDF({
+      collaboratorName: collabName.trim(),
+      cpf: collabCpf.trim(),
+      role: collabRole.trim(),
+      department: collabDept.trim() || asset.location?.name || '',
+      asset,
+      reason: termoReason.trim(),
+    });
+    setShowTermoModal(false);
+  }
+
+  const depreciation = useMemo(() => {
+    if (!asset) return null;
+    return calculateDepreciation(asset);
+  }, [asset]);
+
   if (loading) return <div className="p-6"><Spinner size="lg" className="py-20" /></div>;
-  if (error) return (
-    <div className="p-6">
-      <Link to="/inventario" className="inline-flex items-center gap-1.5 text-sm text-primary-600 hover:text-primary-700 mb-4">
-        <ArrowLeft className="w-4 h-4" /> Voltar ao inventário
-      </Link>
-      <ErrorState message={error} />
-    </div>
-  );
-  if (!asset) return null;
+  if (error || !asset) return <div className="p-6"><ErrorState message={error || 'Ativo não encontrado'} /></div>;
 
   const infoItems = [
-    { icon: Tag, label: 'Código do Ativo', value: asset.asset_code, mono: true },
-    { icon: Tag, label: 'Número de Série', value: asset.serial_number || '—', mono: true },
-    { icon: MapPin, label: 'Localização', value: asset.location?.name || '—' },
-    { icon: User, label: 'Responsável', value: asset.responsible || '—' },
-    { icon: Calendar, label: 'Data de Aquisição', value: formatDate(asset.acquisition_date) },
-    { icon: DollarSign, label: 'Valor de Aquisição', value: formatCurrency(asset.acquisition_value) },
-    { icon: Shield, label: 'Garantia até', value: formatDate(asset.warranty_until) },
-    { icon: Wrench, label: 'Última Manutenção', value: formatDate(asset.last_maintenance) },
-    { icon: Calendar, label: 'Próx. Manutenção', value: formatDate(asset.next_maintenance) },
+    { label: 'Código do Ativo', value: asset.asset_code, icon: Tag, mono: true },
+    { label: 'Plaqueta / Serial', value: asset.serial_number || 'Não informado', icon: Shield, mono: true },
+    { label: 'Localização / Filial', value: asset.location?.name || 'Não atribuído', icon: MapPin },
+    { label: 'Responsável Atual', value: asset.responsible || 'Sem responsável direto', icon: User },
+    { label: 'Data de Aquisição', value: asset.acquisition_date ? formatDate(asset.acquisition_date) : 'Não informada', icon: Calendar },
+    { label: 'Valor de Aquisição Original', value: formatCurrency(asset.acquisition_value || 0), icon: DollarSign },
+    { label: 'Próxima Manutenção', value: asset.next_maintenance ? formatDate(asset.next_maintenance) : 'Não agendada', icon: Wrench },
+    { label: 'Garantia até', value: asset.warranty_until ? formatDate(asset.warranty_until) : 'Não informada', icon: Shield },
   ];
 
   return (
@@ -159,24 +184,31 @@ export default function AssetDetail() {
         title={asset.name}
         subtitle={asset.category?.name}
         actions={
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 flex-wrap">
+            <button
+              onClick={() => setShowTermoModal(true)}
+              className="inline-flex items-center gap-1.5 bg-indigo-600 hover:bg-indigo-700 text-white text-xs sm:text-sm font-medium px-3 py-2 rounded-lg shadow-sm transition-colors"
+            >
+              <FileSignature className="w-4 h-4" />
+              <span className="hidden sm:inline">Emitir</span> Termo de Cautela
+            </button>
             <button
               onClick={() => setShowEdit(true)}
-              className="inline-flex items-center gap-2 bg-white border border-slate-200 hover:bg-slate-50 text-slate-700 text-sm font-medium px-3 py-2 rounded-lg"
+              className="inline-flex items-center gap-1.5 bg-white border border-slate-200 hover:bg-slate-50 text-slate-700 text-xs sm:text-sm font-medium px-3 py-2 rounded-lg"
             >
               <Pencil className="w-4 h-4" />
               <span className="hidden sm:inline">Editar</span>
             </button>
             <button
               onClick={() => setShowDelete(true)}
-              className="inline-flex items-center gap-2 bg-white border border-slate-200 hover:bg-red-50 hover:border-red-200 hover:text-red-600 text-slate-700 text-sm font-medium px-3 py-2 rounded-lg"
+              className="inline-flex items-center gap-1.5 bg-white border border-slate-200 hover:bg-red-50 hover:border-red-200 hover:text-red-600 text-slate-700 text-xs sm:text-sm font-medium px-3 py-2 rounded-lg"
             >
               <Trash2 className="w-4 h-4" />
               <span className="hidden sm:inline">Excluir</span>
             </button>
             <button
               onClick={() => setShowQR(!showQR)}
-              className="inline-flex items-center gap-2 bg-white border border-slate-200 hover:bg-slate-50 text-slate-700 text-sm font-medium px-3 py-2 rounded-lg"
+              className="inline-flex items-center gap-1.5 bg-white border border-slate-200 hover:bg-slate-50 text-slate-700 text-xs sm:text-sm font-medium px-3 py-2 rounded-lg"
             >
               <QrIcon className="w-4 h-4" />
               <span className="hidden sm:inline">QR Code</span>
@@ -186,7 +218,7 @@ export default function AssetDetail() {
       />
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        {/* Left: Image + Info */}
+        {/* Left: Image + Info + Depreciation */}
         <div className="lg:col-span-2 space-y-6">
           {/* Image card */}
           <div className="bg-white rounded-xl border border-slate-200 overflow-hidden">
@@ -204,8 +236,8 @@ export default function AssetDetail() {
             </div>
             {asset.notes && (
               <div className="p-4 border-t border-slate-100">
-                <p className="text-xs font-medium text-slate-500 mb-1">Observações</p>
-                <p className="text-sm text-slate-700">{asset.notes}</p>
+                <p className="text-xs font-semibold text-slate-500 mb-1 uppercase tracking-wide">Notas & Plaqueta Original</p>
+                <p className="text-sm text-slate-700 whitespace-pre-wrap">{asset.notes}</p>
               </div>
             )}
           </div>
@@ -233,39 +265,98 @@ export default function AssetDetail() {
             </div>
           </div>
 
-          {/* History timeline */}
+          {/* Depreciation Card */}
+          {depreciation && (
+            <div className="bg-white rounded-xl border border-slate-200 p-5">
+              <h3 className="font-semibold text-slate-900 mb-3 flex items-center gap-2">
+                <Coins className="w-4 h-4 text-indigo-600" />
+                Cálculo de Depreciação e Valor Contábil
+              </h3>
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 bg-slate-50 p-4 rounded-xl border border-slate-200 mb-3">
+                <div>
+                  <p className="text-xs text-slate-500">Valor Original</p>
+                  <p className="text-sm font-bold text-slate-900">{formatCurrency(depreciation.acquisitionValue)}</p>
+                </div>
+                <div>
+                  <p className="text-xs text-slate-500">Valor Contábil Atual</p>
+                  <p className="text-sm font-bold text-indigo-700">{formatCurrency(depreciation.currentBookValue)}</p>
+                </div>
+                <div>
+                  <p className="text-xs text-slate-500">Depreciação Acumulada</p>
+                  <p className="text-sm font-semibold text-amber-700">-{formatCurrency(depreciation.accumulatedDepreciation)} ({depreciation.depreciationPercent}%)</p>
+                </div>
+                <div>
+                  <p className="text-xs text-slate-500">Valor Residual</p>
+                  <p className="text-sm font-bold text-teal-700">{formatCurrency(depreciation.residualValue)}</p>
+                </div>
+              </div>
+              <div className="flex items-center justify-between text-xs text-slate-500">
+                <span>Vida útil contábil: <strong>{depreciation.usefulLifeYears} anos</strong></span>
+                <span>Status: {depreciation.isFullyDepreciated ? <strong className="text-amber-600">Totalmente Depreciado</strong> : 'Em depreciação normal'}</span>
+              </div>
+            </div>
+          )}
+        </div>
+
+        {/* Right: Status + QR Code + History */}
+        <div className="space-y-6">
+          {/* Quick status change */}
           <div className="bg-white rounded-xl border border-slate-200 p-5">
-            <h3 className="font-semibold text-slate-900 mb-4">Histórico de Movimentações</h3>
+            <h3 className="font-semibold text-slate-900 mb-3">Alterar Status</h3>
+            <div className="grid grid-cols-2 gap-2">
+              {(['operacional', 'manutencao', 'emprestado', 'baixado'] as AssetStatus[]).map((st) => (
+                <button
+                  key={st}
+                  onClick={() => handleStatusChange(st)}
+                  disabled={updating || asset.status === st}
+                  className={`px-3 py-2 text-xs font-semibold rounded-lg border text-center transition-all ${
+                    asset.status === st
+                      ? STATUS_STYLES[st] + ' ring-2 ring-primary-400'
+                      : 'border-slate-200 text-slate-600 hover:bg-slate-50'
+                  }`}
+                >
+                  {STATUS_LABELS[st]}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {/* QR Code preview */}
+          {showQR && (
+            <div className="bg-white rounded-xl border border-slate-200 p-5 text-center animate-slide-down">
+              <h3 className="font-semibold text-slate-900 mb-3">QR Code Patrimonial</h3>
+              <div className="inline-block p-3 bg-white border-2 border-slate-200 rounded-xl mb-3 shadow-sm">
+                <QRCodeSVG value={`${window.location.origin}/inventario/${asset.id}`} size={160} level="M" />
+              </div>
+              <p className="font-mono text-xs font-bold text-slate-700">{asset.asset_code}</p>
+              <button
+                onClick={() => window.print()}
+                className="mt-3 inline-flex items-center gap-1.5 text-xs text-primary-600 hover:text-primary-700 font-medium"
+              >
+                <Printer className="w-3.5 h-3.5" />
+                Imprimir Etiqueta
+              </button>
+            </div>
+          )}
+
+          {/* Movements Timeline */}
+          <div className="bg-white rounded-xl border border-slate-200 p-5">
+            <h3 className="font-semibold text-slate-900 mb-4">Histórico do Bem</h3>
             {movements.length === 0 ? (
-              <p className="text-sm text-slate-400 py-6 text-center">Nenhuma movimentação registrada.</p>
+              <p className="text-xs text-slate-400 py-4 text-center">Nenhuma movimentação registrada.</p>
             ) : (
-              <div className="space-y-0">
-                {movements.map((move, idx) => {
-                  const Icon = MOVEMENT_ICON_MAP[move.type];
+              <div className="space-y-4">
+                {movements.map((move) => {
+                  const Icon = MOVEMENT_ICON_MAP[move.type] || MessageSquare;
+                  const colorClass = MOVEMENT_COLOR[move.type] || 'bg-slate-100 text-slate-600';
                   return (
-                    <div key={move.id} className="flex gap-3">
-                      <div className="flex flex-col items-center">
-                        <div className={`w-8 h-8 rounded-full flex items-center justify-center flex-shrink-0 ${MOVEMENT_COLOR[move.type]}`}>
-                          <Icon className="w-4 h-4" />
-                        </div>
-                        {idx < movements.length - 1 && <div className="w-0.5 flex-1 bg-slate-200 my-1" />}
+                    <div key={move.id} className="flex gap-3 text-xs">
+                      <div className={`w-7 h-7 rounded-lg ${colorClass} flex items-center justify-center flex-shrink-0 mt-0.5`}>
+                        <Icon className="w-3.5 h-3.5" />
                       </div>
-                      <div className="pb-5 flex-1">
-                        <div className="flex items-center justify-between gap-2">
-                          <p className="text-sm font-medium text-slate-900">{MOVEMENT_LABELS[move.type]}</p>
-                          <p className="text-xs text-slate-400">{formatDateTime(move.created_at)}</p>
-                        </div>
-                        {move.description && <p className="text-sm text-slate-600 mt-0.5">{move.description}</p>}
-                        {(move.previous_value || move.new_value) && (
-                          <p className="text-xs text-slate-500 mt-1">
-                            {move.previous_value && <span className="line-through">{move.previous_value}</span>}
-                            {move.previous_value && move.new_value && ' → '}
-                            {move.new_value && <span className="font-medium">{move.new_value}</span>}
-                          </p>
-                        )}
-                        {move.performed_by && (
-                          <p className="text-xs text-slate-400 mt-1">por {move.performed_by}</p>
-                        )}
+                      <div className="flex-1 min-w-0">
+                        <p className="font-medium text-slate-900">{move.description || MOVEMENT_LABELS[move.type]}</p>
+                        <p className="text-slate-400 text-[11px] mt-0.5">{formatDateTime(move.created_at)}</p>
                       </div>
                     </div>
                   );
@@ -274,87 +365,124 @@ export default function AssetDetail() {
             )}
           </div>
         </div>
-
-        {/* Right: Status control + QR */}
-        <div className="space-y-6">
-          {/* Status control */}
-          <div className="bg-white rounded-xl border border-slate-200 p-5">
-            <h3 className="font-semibold text-slate-900 mb-1">Status do Ativo</h3>
-            <p className="text-xs text-slate-500 mb-4">Altere o status para refletir a situação atual</p>
-            <div className={`rounded-lg p-4 mb-4 ${STATUS_STYLES[asset.status].bg} ${STATUS_STYLES[asset.status].border} border`}>
-              <div className="flex items-center gap-2">
-                <span className={`w-2.5 h-2.5 rounded-full ${STATUS_STYLES[asset.status].dot}`} />
-                <span className={`font-semibold ${STATUS_STYLES[asset.status].text}`}>{STATUS_LABELS[asset.status]}</span>
-              </div>
-            </div>
-            <div className="space-y-2">
-              {(['operacional', 'manutencao', 'emprestado', 'baixado'] as AssetStatus[]).map((s) => (
-                <button
-                  key={s}
-                  onClick={() => changeStatus(s)}
-                  disabled={updating || s === asset.status}
-                  className={`w-full flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-medium border transition-all ${
-                    s === asset.status
-                      ? `${STATUS_STYLES[s].bg} ${STATUS_STYLES[s].border} ${STATUS_STYLES[s].text} cursor-default`
-                      : 'border-slate-200 text-slate-600 hover:bg-slate-50'
-                  } ${updating ? 'opacity-50' : ''}`}
-                >
-                  <span className={`w-2 h-2 rounded-full ${STATUS_STYLES[s].dot}`} />
-                  {STATUS_LABELS[s]}
-                </button>
-              ))}
-            </div>
-          </div>
-
-          {/* QR Code */}
-          {showQR && (
-            <div className="bg-white rounded-xl border border-slate-200 p-5 text-center animate-slide-up">
-              <h3 className="font-semibold text-slate-900 mb-1">QR Code do Ativo</h3>
-              <p className="text-xs text-slate-500 mb-4">Escaneie para acessar rapidamente este ativo</p>
-              <div className="inline-block p-4 bg-white border-2 border-slate-200 rounded-xl">
-                <QRCodeSVG
-                  value={`${window.location.origin}/#/inventario/${asset.id}`}
-                  size={180}
-                  level="M"
-                  includeMargin={false}
-                />
-              </div>
-              <p className="text-xs font-mono text-slate-500 mt-3">{asset.asset_code}</p>
-              <button
-                onClick={() => window.print()}
-                className="mt-4 inline-flex items-center gap-2 text-sm text-primary-600 hover:text-primary-700 font-medium"
-              >
-                <Printer className="w-4 h-4" />
-                Imprimir
-              </button>
-            </div>
-          )}
-        </div>
       </div>
 
-      {/* Modals */}
+      {/* Modal Termo de Responsabilidade */}
+      {showTermoModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm">
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-lg overflow-hidden animate-slide-up">
+            <div className="px-6 py-4 border-b border-slate-200 flex items-center justify-between bg-slate-50">
+              <div className="flex items-center gap-2">
+                <FileSignature className="w-5 h-5 text-indigo-600" />
+                <h3 className="font-bold text-slate-900">Emitir Termo de Responsabilidade</h3>
+              </div>
+              <button onClick={() => setShowTermoModal(false)} className="text-slate-400 hover:text-slate-600">
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="p-6 space-y-3.5 text-sm">
+              <p className="text-xs text-slate-500">
+                Gere um termo oficial em PDF para formalizar a entrega e cautela deste equipamento: <strong>{asset.name} ({asset.asset_code})</strong>.
+              </p>
+
+              <div>
+                <label className="block text-xs font-semibold text-slate-700 mb-1">Nome Completo do Colaborador *</label>
+                <input
+                  type="text"
+                  value={collabName}
+                  onChange={(e) => setCollabName(e.target.value)}
+                  placeholder="Ex: Carlos Eduardo Silva"
+                  className="w-full px-3 py-2 text-sm border border-slate-200 rounded-lg focus:ring-2 focus:ring-primary-500"
+                />
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-semibold text-slate-700 mb-1">CPF</label>
+                  <input
+                    type="text"
+                    value={collabCpf}
+                    onChange={(e) => setCollabCpf(e.target.value)}
+                    placeholder="000.000.000-00"
+                    className="w-full px-3 py-2 text-sm border border-slate-200 rounded-lg focus:ring-2 focus:ring-primary-500"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold text-slate-700 mb-1">Cargo / Função</label>
+                  <input
+                    type="text"
+                    value={collabRole}
+                    onChange={(e) => setCollabRole(e.target.value)}
+                    placeholder="Ex: Supervisor Operacional"
+                    className="w-full px-3 py-2 text-sm border border-slate-200 rounded-lg focus:ring-2 focus:ring-primary-500"
+                  />
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-slate-700 mb-1">Setor / Unidade</label>
+                <input
+                  type="text"
+                  value={collabDept}
+                  onChange={(e) => setCollabDept(e.target.value)}
+                  placeholder={asset.location?.name || 'Ex: Filial Oeste'}
+                  className="w-full px-3 py-2 text-sm border border-slate-200 rounded-lg focus:ring-2 focus:ring-primary-500"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-slate-700 mb-1">Finalidade / Motivo da Entrega</label>
+                <input
+                  type="text"
+                  value={termoReason}
+                  onChange={(e) => setTermoReason(e.target.value)}
+                  className="w-full px-3 py-2 text-sm border border-slate-200 rounded-lg focus:ring-2 focus:ring-primary-500"
+                />
+              </div>
+            </div>
+
+            <div className="px-6 py-4 border-t border-slate-200 bg-slate-50 flex items-center justify-end gap-3">
+              <button
+                onClick={() => setShowTermoModal(false)}
+                className="px-4 py-2 text-sm text-slate-600 hover:bg-slate-200 rounded-lg"
+              >
+                Cancelar
+              </button>
+              <button
+                onClick={handleGenerateTermo}
+                disabled={!collabName.trim()}
+                className="px-4 py-2 text-sm font-semibold text-white bg-indigo-600 hover:bg-indigo-700 rounded-lg shadow-sm disabled:opacity-50"
+              >
+                Baixar Termo em PDF
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Edit modal */}
       {showEdit && (
         <AssetFormModal
           asset={asset}
           onClose={() => setShowEdit(false)}
           onSaved={async () => {
             setShowEdit(false);
-            setLoading(true);
             const { data } = await supabase
               .from('assets')
               .select('*, category:categories(*), location:locations(*)')
               .eq('id', asset.id)
-              .maybeSingle();
+              .single();
             if (data) setAsset(data);
-            setLoading(false);
           }}
         />
       )}
 
+      {/* Delete confirmation */}
       {showDelete && (
         <ConfirmDialog
-          title="Excluir este ativo?"
-          message="Esta ação não pode ser desfeita. O ativo e todo o seu histórico de movimentações serão removidos permanentemente."
+          title="Excluir ativo?"
+          message="Esta ação não pode ser desfeita. Todo o histórico e movimentações deste ativo serão removidos."
           confirmLabel="Excluir"
           danger
           onConfirm={handleDelete}
