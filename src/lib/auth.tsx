@@ -285,12 +285,32 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const signOut = async () => {
     setLoading(true);
     setError(null);
-    setCachedAccess(null);
-    await supabase.auth.signOut();
-    setSession(null);
-    setUser(null);
-    setAccess(null);
-    setLoading(false);
+    
+    try {
+      // Força a limpeza do cache de acesso imediatamente
+      setCachedAccess(null);
+      
+      const signOutPromise = supabase.auth.signOut();
+      const timeoutPromise = new Promise<{ error: Error }>((_, reject) =>
+        setTimeout(() => reject(new Error('Timeout no logout')), 3000)
+      );
+      
+      const result = await Promise.race([signOutPromise, timeoutPromise]).catch((e) => ({ error: e }));
+      
+      if (result?.error) {
+        console.warn('Falha no logout global, forçando logout local:', result.error);
+        await supabase.auth.signOut({ scope: 'local' }).catch(() => {});
+      }
+    } catch (err) {
+      console.warn('Erro durante signOut:', err);
+      await supabase.auth.signOut({ scope: 'local' }).catch(() => {});
+    } finally {
+      // Garante que o estado local será limpo e o usuário será deslogado visualmente
+      setSession(null);
+      setUser(null);
+      setAccess(null);
+      setLoading(false);
+    }
   };
 
   const isAdmin = access?.role === 'admin';
