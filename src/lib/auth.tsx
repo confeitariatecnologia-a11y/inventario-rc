@@ -13,6 +13,7 @@ interface AuthContextValue {
   error: string | null;
   signIn: (email: string, password: string) => Promise<void>;
   signOut: () => Promise<void>;
+  resetPassword: (identifier: string) => Promise<void>;
   isAdmin: boolean;
   isManager: boolean;
   isConsulta: boolean;
@@ -231,6 +232,56 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     }
   };
 
+  const resetPassword = async (identifier: string) => {
+    setLoading(true);
+    setError(null);
+
+    const cleanInput = identifier.trim();
+
+    try {
+      let targetEmail = cleanInput.toLowerCase();
+
+      if (!cleanInput.includes('@')) {
+        const { data: userByExactName } = await supabase
+          .from('user_accesses')
+          .select('email')
+          .ilike('full_name', cleanInput)
+          .maybeSingle();
+
+        if (userByExactName?.email) {
+          targetEmail = userByExactName.email.toLowerCase();
+        } else {
+          const { data: userByPartialName } = await supabase
+            .from('user_accesses')
+            .select('email')
+            .ilike('full_name', `%${cleanInput}%`)
+            .limit(1)
+            .maybeSingle();
+
+          if (userByPartialName?.email) {
+            targetEmail = userByPartialName.email.toLowerCase();
+          } else {
+            setError('Usuário não encontrado. Verifique o nome digitado ou use seu e-mail.');
+            setLoading(false);
+            return;
+          }
+        }
+      }
+
+      const { error } = await supabase.auth.resetPasswordForEmail(targetEmail, {
+        redirectTo: window.location.origin, // Redirects back to app root where onAuthStateChange will handle it
+      });
+
+      if (error) throw error;
+    } catch (err) {
+      console.error('[Auth] resetPassword error:', err);
+      setError(err instanceof Error ? err.message : 'Erro ao solicitar redefinição de senha.');
+      throw err; // Re-throw for component to catch
+    } finally {
+      setLoading(false);
+    }
+  };
+
   const signOut = async () => {
     setLoading(true);
     setError(null);
@@ -255,6 +306,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       error,
       signIn,
       signOut,
+      resetPassword,
       isAdmin,
       isManager,
       isConsulta,

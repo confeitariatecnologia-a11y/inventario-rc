@@ -16,8 +16,10 @@ import {
   ChevronRight,
   ChevronLeft,
   Shield,
+  KeyRound,
 } from 'lucide-react';
 import { useAuth } from '@/lib/auth';
+import { ChangePasswordModal } from '@/components';
 
 interface SidebarProps {
   mobileOpen: boolean;
@@ -43,6 +45,7 @@ export default function Sidebar({ mobileOpen, onCloseMobile }: SidebarProps) {
     '/ordens-servico': false,
     '/ti-software': false,
   });
+  const [isPasswordModalOpen, setIsPasswordModalOpen] = useState(false);
 
   const userInitials = (access?.full_name || user?.email || 'U')
     .split(' ')
@@ -287,7 +290,18 @@ export default function Sidebar({ mobileOpen, onCloseMobile }: SidebarProps) {
         </nav>
 
         {/* Footer with Logout & Theme style action */}
-        <div className="p-3 border-t border-slate-800/80 bg-slate-950/40">
+        <div className="p-3 border-t border-slate-800/80 bg-slate-950/40 space-y-1">
+          <button
+            type="button"
+            onClick={() => setIsPasswordModalOpen(true)}
+            className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-xs font-semibold text-slate-300 hover:bg-slate-800/80 hover:text-white transition-colors ${
+              collapsed ? 'justify-center px-0' : ''
+            }`}
+            title="Alterar Senha"
+          >
+            <KeyRound className="w-4 h-4 flex-shrink-0" />
+            {!collapsed && <span className="truncate">Alterar Senha</span>}
+          </button>
           <button
             type="button"
             onClick={signOut}
@@ -301,6 +315,11 @@ export default function Sidebar({ mobileOpen, onCloseMobile }: SidebarProps) {
           </button>
         </div>
       </aside>
+
+      <ChangePasswordModal 
+        isOpen={isPasswordModalOpen} 
+        onClose={() => setIsPasswordModalOpen(false)} 
+      />
     </>
   );
 }

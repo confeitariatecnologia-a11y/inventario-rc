@@ -6,6 +6,7 @@ export { default as AssetCard } from './AssetCard';
 export { default as Spinner } from './Spinner';
 export { default as EmptyState } from './EmptyState';
 export { default as ErrorState } from './ErrorState';
+export { ChangePasswordModal } from './ChangePasswordModal';
 export { default as ConfirmDialog } from './ConfirmDialog';
 export { default as AssetFormModal } from './AssetFormModal';
 export { default as ErrorBoundary } from './ErrorBoundary';
