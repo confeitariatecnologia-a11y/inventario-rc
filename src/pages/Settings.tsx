@@ -168,10 +168,20 @@ export default function Settings() {
             console.warn('[Settings] Aviso Supabase Auth:', authError.message);
             if (authError.message.includes('already registered')) {
               _authNotice = 'Usuário já registrado no Auth';
+            } else {
+              let errorMsg = authError.message;
+              if (authError.status === 429 || authError.message.includes('rate_limit')) {
+                errorMsg = 'Limite de criação de logins atingido (proteção anti-spam). Tente novamente mais tarde ou configure um provedor de e-mail.';
+              }
+              setAccessError(`Erro ao criar login: ${errorMsg}`);
+              setSavingAccess(false);
+              return;
             }
           }
-        } catch {
-          // Continua para cadastrar os acessos
+        } catch (err) {
+          setAccessError('Falha na comunicação com o serviço de autenticação.');
+          setSavingAccess(false);
+          return;
         }
       }
 
